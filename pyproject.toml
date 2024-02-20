@@ -1,0 +1,15 @@
+[tool.black]
+line-length = 88
+target-version = ['py38']
+include = '\.pyi?$'
+exclude = ''
+
+[tool.pytest.ini_options]
+timeout = 60
+testpaths = ["tests"]
+markers = ["uses_rllib"]
+
+[tool.isort]
+profile = "black"
+known_first_party = ["occupancy_measures"]
+known_third_party = ["ray", "torch"]

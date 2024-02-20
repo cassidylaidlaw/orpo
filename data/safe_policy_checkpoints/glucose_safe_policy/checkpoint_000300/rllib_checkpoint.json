@@ -1,0 +1,1 @@
+{"type": "Algorithm", "checkpoint_version": "1.1", "format": "cloudpickle", "state_file": "data/logs/glucose/BC/true/model_256-256/no_seeds-100_episodes/entropy_coeff-1/seed_0/2024-01-24_07-33-13/checkpoint_000300/algorithm_state.pkl", "policy_ids": ["safe_policy0"], "ray_version": "2.7.1", "ray_commit": "9f07c12615958c3af3760604f6dcacc4b3758a47"}

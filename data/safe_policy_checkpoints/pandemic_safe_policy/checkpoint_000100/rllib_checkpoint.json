@@ -1,0 +1,1 @@
+{"type": "Algorithm", "checkpoint_version": "1.1", "format": "cloudpickle", "state_file": "data/logs/pandemic/BC/true/model_128-128/original_safe_policy_data/restored_old_params/seed_0/2024-01-16_16-36-07/checkpoint_000100/algorithm_state.pkl", "policy_ids": ["safe_policy0"], "ray_version": "2.7.1", "ray_commit": "9f07c12615958c3af3760604f6dcacc4b3758a47"}

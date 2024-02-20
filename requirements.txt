@@ -1,0 +1,20 @@
+imutils>=0.5
+matplotlib>=3.5
+opencv-python>=4.6
+pyglet>=1.3
+ray[rllib]==2.7.1
+sacred>=0.8
+scipy>=1.9
+torch>=1.13
+tqdm>=4.63
+numpy>=1.22
+typing-extensions>=4.4
+lxml>=4.9
+pandemic-simulator @ git+https://github.com/shivamsinghal001/pandemic.git
+git+https://github.com/shivamsinghal001/glucose.git
+git+https://github.com/shivamsinghal001/flow_reward_misspecification.git
+pygame>=2.0.0
+docker>=6.0.0
+filelock>=3.0.0
+requests<2.29
+traci
