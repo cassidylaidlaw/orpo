@@ -3,7 +3,6 @@ from distutils.core import setup
 with open("requirements.txt") as f:
     requirements = []
     for line in f:
-        # Exclude editable installs or requirements files
         if not line.startswith(("-e", "-r", "git+", "http://", "https://")):
             requirements.append(line.strip())
 
@@ -20,7 +19,7 @@ setup(
     package_data={"occupancy_measures": ["py.typed"]},
     version="0.0.1",
     license="MIT",
-    description='Code for the "Preventing Reward Hacking using Occupancy Measure Regularization"',
+    description='Code for "Preventing Reward Hacking using Occupancy Measure Regularization"',
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
     author="Cassidy Laidlaw",
