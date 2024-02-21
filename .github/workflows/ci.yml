@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - '**'
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-20.04]
+        pyversion: ['3.8', '3.9', '3.10']
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Install Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.pyversion }}
+
+      - name: Install other dependencies
+        run: |
+          sudo apt update && sudo apt install ffmpeg libsm6 libxext6 sumo sumo-tools sumo-doc golang libjpeg-turbo8-dev -y
+          sudo ln -s /usr/lib/libgdal.so /usr/lib/libgdal.so.26
+
+      - name: Cache pip
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install pip requirements
+        run: |
+          go env -w GO111MODULE=off
+          pip install --upgrade pip setuptools wheel
+          pip install -r requirements.txt
+          pip install --upgrade -r requirements_dev.txt
+
+      - name: Run flake8
+        run: flake8 occupancy_measures tests
+        if: ${{ always() }}
+
+      - name: Run black
+        run: black --check occupancy_measures figures tests
+        if: ${{ always() }}
+
+      - name: Run isort
+        run: isort --check --diff occupancy_measures tests
+        if: ${{ always() }}
+
+      - name: Check types
+        if: ${{ always() }}
+        run: |
+          mypy occupancy_measures tests
+      
+      - name: Run tests
+        if: ${{ always() }}
+        timeout-minutes: 10
+        run: |
+          export SUMO_HOME=/usr/share/sumo
+          pytest --log-cli-level=INFO
