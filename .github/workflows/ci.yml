@@ -48,7 +48,7 @@ jobs:
         if: ${{ always() }}
 
       - name: Run black
-        run: black --check occupancy_measures figures tests
+        run: black --check occupancy_measures tests
         if: ${{ always() }}
 
       - name: Run isort
