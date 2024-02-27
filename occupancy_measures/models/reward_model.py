@@ -1,4 +1,4 @@
-from typing import List, TypedDict
+from typing import Callable, List, Optional, TypedDict
 
 import torch
 import torch.nn.functional as F
@@ -15,6 +15,7 @@ from torch import nn
 class RewardModelConfig(TypedDict, total=False):
     reward_model_width: int
     reward_model_depth: int
+    normalize_obs: Optional[Callable]
 
 
 class RewardModel(TorchModelV2, nn.Module):
@@ -29,6 +30,11 @@ class RewardModel(TorchModelV2, nn.Module):
         )
         self.rew_model_width = custom_model_config.get("reward_model_width", 256)
         self.rew_model_depth = custom_model_config.get("reward_model_depth", 2)
+        self.normalize_obs = custom_model_config.get("normalize_obs", None)
+        if self.normalize_obs is not None:
+            assert callable(
+                self.normalize_obs
+            ), "Must specify a function for normalizing the observations in-place"
 
         rew_in_dim = utils.flatdim(action_space) + utils.flatdim(obs_space)
 
@@ -54,6 +60,8 @@ class RewardModel(TorchModelV2, nn.Module):
 
     def learned_reward(self, input_dict):
         obs = input_dict[SampleBatch.OBS].flatten(1)
+        if self.normalize_obs is not None:
+            self.normalize_obs(obs)
         actions = input_dict[SampleBatch.ACTIONS]
         net_input = self._get_concatenated_obs_action(obs, actions)
         predicted_rew = self.fc_reward_net(net_input)

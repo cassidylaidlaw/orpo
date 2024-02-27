@@ -38,6 +38,7 @@ class LearnedRewardWrapper(MultiAgentEnv):
         base_env_name = config["env"]
         base_env_config = config["env_config"]
         env_creator = _global_registry.get(ENV_CREATOR, base_env_name)
+        self.base_env_config = config["env_config"]
         base_env = env_creator(base_env_config)
         if isinstance(base_env, MultiAgentEnv):
             self.base_env = base_env
@@ -135,6 +136,11 @@ class LearnedRewardWrapper(MultiAgentEnv):
                         SampleBatch.ACTIONS: action_tensor,
                     }
                     reward = self.reward_fn(input_dict)
+                    if (
+                        "reward_scale" in self.base_env_config
+                        and self.base_env_config["reward_scale"] is not None
+                    ):
+                        reward *= self.base_env_config["reward_scale"]
                     base_reward = {id: reward.item()}
                     for info_key in base_infos[id].keys():
                         if "proxy" in info_key:

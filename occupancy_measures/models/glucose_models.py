@@ -24,6 +24,12 @@ class GlucoseModelConfig(TypedDict, total=False):
     use_subcutaneous_glucose_obs: bool
 
 
+def normalize_obs(obs):
+    obs[..., 0] = (obs[..., 0] - 100) / 100
+    obs[..., 1] = obs[..., 1] * 10
+    return obs
+
+
 class GlucoseModel(ModelWithDiscriminator):
     def __init__(self, obs_space, action_space, num_outputs, model_config, name):
         ModelWithDiscriminator.__init__(
@@ -91,14 +97,10 @@ class GlucoseModel(ModelWithDiscriminator):
         self.discriminator_submodules.append("lstm_discriminator")
         self.discriminator_submodules.append("fc_discriminator")
 
-    def normalize_obs(self, obs):
-        obs[..., 0] = (obs[..., 0] - 100) / 100
-        obs[..., 1] = obs[..., 1] * 10
-
     def forward(self, input_dict, state, seq_lens):
         obs = input_dict[SampleBatch.OBS].permute(0, 2, 1).clone()
         # Normalize observations
-        self.normalize_obs(obs)
+        normalize_obs(obs)
         lstm_out, _ = self.lstm(obs)
         self._backbone_out = lstm_out[:, -1, :]
         # self._backbone_out = self.backbone(obs[:, :, :].mean(axis=1))
@@ -142,7 +144,7 @@ class GlucoseModel(ModelWithDiscriminator):
                 normalized_input_dict[SampleBatch.OBS] = (
                     input_dict[SampleBatch.OBS].clone().permute(0, 2, 1)
                 )
-                self.normalize_obs(normalized_input_dict[SampleBatch.OBS])
+                normalize_obs(normalized_input_dict[SampleBatch.OBS])
                 normalized_input_dict[SampleBatch.OBS] = normalized_input_dict[
                     SampleBatch.OBS
                 ].permute(0, 2, 1)
@@ -152,7 +154,7 @@ class GlucoseModel(ModelWithDiscriminator):
         obs = input_dict[SampleBatch.OBS].clone()
         indices = torch.tensor(tuple(range(*self.history_range)))
         obs = obs[:, :, indices].permute(0, 2, 1)
-        self.normalize_obs(obs)
+        normalize_obs(obs)
         if self.use_cgm:
             obs = obs[:, :, :1]
         obs_embed, _ = self.lstm_discriminator(obs)

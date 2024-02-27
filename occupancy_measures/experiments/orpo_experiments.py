@@ -22,6 +22,7 @@ from ..agents.generate_safe_policy import SafePolicyGenerationAlgorithm
 from ..agents.learned_reward_algorithm import LearnedRewardAlgorithm
 from ..agents.orpo import ORPO, ORPOPolicy
 from ..envs.learned_reward_wrapper import LearnedRewardWrapperConfig
+from ..models.glucose_models import normalize_obs
 from ..models.reward_model import RewardModelConfig
 from ..utils.os_utils import available_cpu_count
 from ..utils.training_utils import (  # convert_to_msgpack_checkpoint,
@@ -447,18 +448,21 @@ def common_config(  # noqa: C901
         noise_prob = 0.0
         action_info_key = []
         rew_clip = 50
-
+        obs_normalization_func = None
         if env_to_run == "tomato":
             config.env = "tomato_env_multiagent"
         elif env_to_run == "glucose":
             config.env = "glucose_env_multiagent"
+            obs_normalization_func = normalize_obs
 
         max_seq_len = 20
         reward_model_width = 32
         reward_model_depth = 2
+
         custom_model_config: RewardModelConfig = {
             "reward_model_depth": reward_model_depth,
             "reward_model_width": reward_model_width,
+            "normalize_obs": obs_normalization_func,
         }
         model_config = {
             "max_seq_len": max_seq_len,
