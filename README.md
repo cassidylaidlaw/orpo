@@ -1,6 +1,6 @@
 # Preventing Reward Hacking with Occupancy Measure Regularization
 
-This repository contains code for "Preventing Reward Hacking with Occupancy Measure Regularization".
+This repository contains code for the paper "[Preventing Reward Hacking with Occupancy Measure Regularization](https://arxiv.org/abs/2403.03185)".
 
 All Python code is under the `occupancy_measures` package. Run
 
