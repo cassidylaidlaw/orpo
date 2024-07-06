@@ -34,7 +34,7 @@ You can set ```ENV``` to any of the following options:
 - traffic ([repo](https://github.com/shivamsinghal001/flow_reward_misspecification))
 - glucose ([repo](https://github.com/shivamsinghal001/glucose))
 
-We ran experiments with the following range of scale-independent coefficients for each regularization technique: 0.0, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 0.0, 20.0. These must be multiplied by the per-timestep rewards in each environment:
+We ran experiments with the following range of scale-independent coefficients for each regularization technique: 0.0, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0. These must be multiplied by the per-timestep rewards in each environment:
 - traffic: 0.0005
 - pandemic: 0.06
 - glucose: 0.03
