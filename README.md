@@ -1,6 +1,6 @@
-# Preventing Reward Hacking with Occupancy Measure Regularization
+# Correlated Proxies: A New Definition and Improved Mitigation for Reward Hacking
 
-This repository contains code for the paper "[Preventing Reward Hacking with Occupancy Measure Regularization](https://arxiv.org/abs/2403.03185)".
+This repository contains code for the paper "[Correlated Proxies: A New Definition and Improved Mitigation for Reward Hacking](https://arxiv.org/abs/2403.03185)". The code for running ORPO on the four non-RLHF environments is in this repository, while the code for RLHF experiments is at https://github.com/cassidylaidlaw/llm_optimization.
 
 All Python code is under the `occupancy_measures` package. Run
 
@@ -74,4 +74,17 @@ For the tomato environment, you must just train a PPO agent using the following 
 
 ```
 python -m occupancy_measures.experiments.orpo_experiments with env_to_run=tomato level=4 reward_fun=true save_freq=1 randomness_eps=0.1
+```
+
+## Citation
+
+If you find this repository useful for your research, please consider citing our paper:
+
+```
+@inproceedings{laidlaw2023rewardhacking,
+  title={Correlated Proxies: A New Definition and Improved Mitigation for Reward Hacking},
+  author={Laidlaw, Cassidy and Singhal, Shivam and Dragan, Anca},
+  booktitle={arXiv preprint},
+  year={2023}
+}
 ```
