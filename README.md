@@ -12,7 +12,7 @@ All Python code is under the `occupancy_measures` package. Run
 to install dependencies.
 
 ## Training the ORPO policies
-Checkpoints for the behavioral cloning (BC) trained safe policies are stored within the `data/safe_policy_checkpoints` directory. For now, these checkpoints were generated in Python 3.9, but in the future, we will provide checkpoints that work with all python versions. You can use these checkpoints to train your own ORPO policies using the following commands: 
+Checkpoints for the behavioral cloning (BC) trained base policies are stored within the `data/safe_policy_checkpoints` directory. For now, these checkpoints were generated in Python 3.9, but in the future, we will provide checkpoints that work with all python versions. You can use these checkpoints to train your own ORPO policies using the following commands: 
 
 - state-action occupancy measure regularization:
 ```
@@ -44,7 +44,7 @@ You can set ```TYPE``` to any of the following divergences:
 - Total variation: "tv"
 - Wasserstein: "wasserstein"
 
-For our experiments using $\sqrt{\chi^2}$ divergence, we ran experiments with the following range of scale-independent coefficients for each regularization technique: 1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01. These must be multiplied by the per-timestep proxy rewards under the safe policy for each environment:
+For our experiments using $\sqrt{\chi^2}$ divergence, we ran experiments with the following range of scale-independent coefficients for each regularization technique: 1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01. As per our theory, we multiply these by the standard deviation of the rewards from the base policy in each environment:
 - traffic: 2e-4
 - pandemic: 0.08
 - glucose: 0.05
@@ -59,12 +59,12 @@ For our experiments using KL divergence, we ran experiments with the following r
 Various notes:
 - To generate the policy without any regularization, simply set ```COEFF``` in the code to 0. These policies will reward hack and can be to replicate our experiments for regularizing away from reward hacking behaviors.
 - To run the regularizing away experiments, you must add the following variable definition to the commands above in addition to negating the coefficients that you use: ```policy_ids_to_load='[["current"]]'```
-- If you do not wish to initialize the policies using the safe policy, simply remove ```checkpoint_to_load_current_policy``` from the commands above. This is needed for replicating our tomato environment results as we start from a randomly initialized policy.
+- If you do not wish to initialize the policies using the base policy, simply remove ```checkpoint_to_load_current_policy``` from the commands above. This is needed for replicating our tomato environment results as we start from a randomly initialized policy.
 - SUMO is a dependency of the traffic environment, but to run all experiments, you will need to set the ```SUMO_HOME``` environment variable. This requires you to first install SUMO, which can generally be done using the following command ```apt install sumo sumo-tools sumo-doc```. Please refer to the traffic environment repository for more information. If you would like to run the experiments without installing this dependency, feel free to comment out any references to the traffic environment within the main package.
 
-## Working with the safe policies
+## Working with the base policies
 
-In order to generate your own safe policies for each of the pandemic, glucose, and traffic environments, you can run the following commands:
+In order to generate your own base policies for each of the pandemic, glucose, and traffic environments, you can run the following commands:
 1. Generate a dummy checkpoint which will be evaluated to generate rollouts:
 
 ```
