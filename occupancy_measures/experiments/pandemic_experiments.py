@@ -187,7 +187,7 @@ def create_pandemic_config(ex):
             callbacks = PandemicCallbacks
 
             # Training
-            num_rollout_workers = 10
+            num_rollout_workers = 20
             num_gpus = 1 if torch.cuda.is_available() else 0
             num_training_iters = 260  # noqa: F841
 

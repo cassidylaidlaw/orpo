@@ -30,6 +30,7 @@ from ..utils.training_utils import (  # convert_to_msgpack_checkpoint,
     load_algorithm_config,
     load_policies_from_checkpoint,
 )
+
 from .glucose_experiments import create_glucose_config
 from .pandemic_experiments import create_pandemic_config
 from .tomato_experiments import create_tomato_config
@@ -244,8 +245,11 @@ def common_config(  # noqa: C901
                 num_policy_ids_given.extend([None] * num_policy_ids_given)
 
         discriminator_state_info_key = None
+        discriminator_num_sgd_iter = None
         update_safe_policy_freq = None
-        action_dist_kl_coeff = None
+        action_dist_divergence_coeff = None
+        action_dist_divergence_type = "kl"
+        train_discriminator_first = True
         num_extra_repeated_safe_policy_batches = 1
         discriminator_reward_clip = float("inf")
         wgan_grad_clip = 0.01
@@ -265,16 +269,21 @@ def common_config(  # noqa: C901
                 str(coef) for coef in config.env_config["proxy_reward_fun"]._weights
             )
             experiment_parts.append(weights_string)
-            num_extra_repeated_safe_policy_batches = 2
-            discriminator_reward_clip = 0.1
+            discriminator_reward_clip = 100
+            discriminator_num_sgd_iter = 2
         elif env_to_run == "glucose":
             config.env = "glucose_env_multiagent"
             discriminator_reward_clip = 1e10
+        elif env_to_run == "traffic":
+            discriminator_reward_clip = 1
 
         ORPO_updates = {
             "discriminator_state_info_key": discriminator_state_info_key,
+            "discriminator_num_sgd_iter": discriminator_num_sgd_iter,
             "update_safe_policy_freq": update_safe_policy_freq,
-            "action_dist_kl_coeff": action_dist_kl_coeff,
+            "action_dist_divergence_coeff": action_dist_divergence_coeff,
+            "action_dist_divergence_type": action_dist_divergence_type,
+            "train_discriminator_first": train_discriminator_first,
             "num_extra_repeated_safe_policy_batches": num_extra_repeated_safe_policy_batches,
             "discriminator_reward_clip": discriminator_reward_clip,
             "wgan_grad_clip": wgan_grad_clip,
@@ -287,7 +296,16 @@ def common_config(  # noqa: C901
         om_divergence_coeffs: List[Union[int, float]] = [0] * num_safe_policies
         om_divergence_type = ["kl"] * num_safe_policies
         assert set(om_divergence_type).issubset(
-            set(["kl", "tv", "wasserstein", "safe_policy_confidence"])
+            set(
+                [
+                    "kl",
+                    "tv",
+                    "chi2",
+                    "sqrt_chi2",
+                    "wasserstein",
+                    "safe_policy_confidence",
+                ]
+            )
         )
         percent_safe_policy = 0.5
         if occupancy_measure_kl_target:
@@ -296,8 +314,10 @@ def common_config(  # noqa: C901
             om_divergence_coeffs_str = "_".join(
                 f"om-kl-target-{coeff}" for coeff in occupancy_measure_kl_target
             )
-        elif action_dist_kl_coeff is not None and not split_om_kl:
-            om_divergence_coeffs_str = "action-kl-" + str(action_dist_kl_coeff)
+        elif action_dist_divergence_coeff is not None and not split_om_kl:
+            om_divergence_coeffs_str = (
+                f"action-{action_dist_divergence_type}-{action_dist_divergence_coeff}"
+            )
         else:
             om_divergence_coeffs_str = "_".join(
                 f"{dist}-{coeff}"
@@ -350,10 +370,10 @@ def common_config(  # noqa: C901
 
         if split_om_kl:
             config.model["custom_model_config"]["use_action_for_disc"] = False
-            if action_dist_kl_coeff is not None:
-                config.action_dist_kl_coeff = action_dist_kl_coeff
+            if action_dist_divergence_coeff is not None:
+                config.action_dist_divergence_coeff = action_dist_divergence_coeff
             else:
-                config.action_dist_kl_coeff = om_divergence_coeffs[0]
+                config.action_dist_divergence_coeff = om_divergence_coeffs[0]
         policies, policy_mapping_fn, policies_to_train = create_multiagent(
             config,
             percent_safe_policy,
@@ -386,6 +406,41 @@ def common_config(  # noqa: C901
                     config_key = "lambda_"
                 delattr(config, config_key)
 
+        use_learned_reward = False
+        if use_learned_reward:
+            learned_reward_str = "using_learned_reward"
+            if "reward_model_width" in config.model["custom_model_config"]:
+                learned_reward_str += "_w" + str(
+                    config.model["custom_model_config"]["reward_model_width"]
+                )
+            if "reward_model_depth" in config.model["custom_model_config"]:
+                learned_reward_str += "_d" + str(
+                    config.model["custom_model_config"]["reward_model_depth"]
+                )
+            experiment_parts.append(learned_reward_str)
+            reward_model_checkpoint = ""
+            if env_to_run == "tomato":
+                config.env = "tomato_env_multiagent"
+            elif env_to_run == "glucose":
+                config.env = "glucose_env_multiagent"
+
+            if reward_model_checkpoint == "":
+                _log.error(
+                    "Please specify a valid checkpoint from which a reward model can be loaded!"
+                )
+                assert False
+
+            assert (
+                config.env_config["reward_fun"] == "proxy"
+            ), "The learned reward function replaces the proxy reward."
+            wrapper_env_config = {
+                "env": config.env,
+                "env_config": config.env_config,
+                "reward_fn_checkpoint": reward_model_checkpoint,
+            }
+            config.env_config = wrapper_env_config
+            config.env = "learned_reward_wrapper"
+
         config.update_from_dict(
             {
                 "num_rollout_workers": num_rollout_workers,
@@ -417,6 +472,41 @@ def common_config(  # noqa: C901
                 delattr(config, config_key)
 
         config.env_config["use_safe_policy_actions"] = True
+        use_learned_reward = False
+        if use_learned_reward:
+            learned_reward_str = "using_learned_reward"
+            if "reward_model_width" in config.model["custom_model_config"]:
+                learned_reward_str += "_w" + str(
+                    config.model["custom_model_config"]["reward_model_width"]
+                )
+            if "reward_model_depth" in config.model["custom_model_config"]:
+                learned_reward_str += "_d" + str(
+                    config.model["custom_model_config"]["reward_model_depth"]
+                )
+            experiment_parts.append(learned_reward_str)
+            reward_model_checkpoint = ""
+            if env_to_run == "tomato":
+                config.env = "tomato_env_multiagent"
+            elif env_to_run == "glucose":
+                config.env = "glucose_env_multiagent"
+
+            if reward_model_checkpoint == "":
+                _log.error(
+                    "Please specify a valid checkpoint from which a reward model can be loaded!"
+                )
+                assert False
+
+            assert (
+                config.env_config["reward_fun"] == "proxy"
+            ), "The learned reward function replaces the proxy reward."
+            wrapper_env_config = {
+                "env": config.env,
+                "env_config": config.env_config,
+                "reward_fn_checkpoint": reward_model_checkpoint,
+            }
+            config.env_config = wrapper_env_config
+            config.env = "learned_reward_wrapper"
+
         safe_policy_action_dist_input_info_key = None
         safe_policy_action_log_std = -3
         categorical_eps = 0.9

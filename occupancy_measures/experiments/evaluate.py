@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import signal
+import tempfile
 from datetime import datetime
 from typing import Any, Dict
 
@@ -21,6 +22,7 @@ from sacred import SETTINGS, Experiment
 
 from occupancy_measures.models.model_with_discriminator import ModelWithDiscriminator
 
+from ..agents.orpo import ORPO, chi2_divergence
 from ..utils.os_utils import available_cpu_count
 from ..utils.training_utils import load_algorithm, load_algorithm_config
 
@@ -29,6 +31,17 @@ os.environ["DISPLAY"] = ":99"
 SETTINGS.CONFIG.READ_ONLY_CONFIG = False
 CURRENT_POLICY_ID = "current"
 SAFE_POLICY_ID = "safe_policy0"
+
+
+class NpEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super(NpEncoder, self).default(obj)
 
 
 faulthandler.register(signal.SIGUSR1)
@@ -46,6 +59,7 @@ def sacred_config(_log):
     generate_histogram = False  # noqa: F841
     checkpoint = ""  # noqa: F841
     episodes = 1  # noqa: F841
+    evaluation_duration_unit = "episodes"  # noqa: F841
     experiment_name = ""  # noqa: F841
     policy_ids: list = [CURRENT_POLICY_ID]  # noqa: F841
     hist_x_label: str = ""  # noqa: F841
@@ -121,33 +135,41 @@ def sacred_config(_log):
     num_workers = 1
     # Could use dataset
     train_batch_size = original_config["train_batch_size"]
-    num_sgd_iter = original_config["num_sgd_iter"]
     num_envs_per_worker = original_config["num_envs_per_worker"]
     rollout_fragment_length = original_config["rollout_fragment_length"]
-    sgd_minibatch_size = original_config["sgd_minibatch_size"]
-    config_updates.update(
-        {  # noqa: F841
-            "_enable_rl_module_api": False,
-            "_enable_learner_api": False,
-            "enable_connectors": False,
-            "seed": seed,
-            "evaluation_num_workers": num_workers,
-            "create_env_on_driver": True,
-            "evaluation_duration": episodes,
-            "evaluation_duration_unit": "episodes",
-            "evaluation_config": {},
-            "num_gpus": 1 if torch.cuda.is_available() else 0,
-            "disable_env_checking": True,
-            "evaluation_sample_timeout_s": 300,
-            "output": out_dir,
-            "train_batch_size": train_batch_size,
-            "num_sgd_iter": num_sgd_iter,
-            "num_rollout_workers": 0,
-            "num_envs_per_worker": num_envs_per_worker,
-            "rollout_fragment_length": rollout_fragment_length,
-            "sgd_minibatch_size": sgd_minibatch_size,
-        }
-    )
+
+    updates = {  # noqa: F841
+        "_enable_rl_module_api": False,
+        "_enable_learner_api": False,
+        "enable_connectors": False,
+        "seed": seed,
+        "evaluation_num_workers": num_workers,
+        "create_env_on_driver": True,
+        "evaluation_duration": (
+            episodes * original_config["env_config"].get("horizon", 1)
+            if evaluation_duration_unit == "timesteps"
+            else episodes
+        ),
+        "evaluation_duration_unit": evaluation_duration_unit,
+        "evaluation_config": {},
+        "num_gpus": 1 if torch.cuda.is_available() else 0,
+        "disable_env_checking": True,
+        "evaluation_sample_timeout_s": 300,
+        "output": out_dir,
+        "train_batch_size": train_batch_size,
+        "num_rollout_workers": 0,
+        "num_envs_per_worker": num_envs_per_worker,
+        "rollout_fragment_length": rollout_fragment_length,
+    }
+
+    # for PPO and ORPO policies
+    if "num_sgd_iter" in original_config:
+        updates["num_sgd_iter"] = original_config["num_sgd_iter"]
+    if "sgd_minibatch_size" in original_config:
+        updates["sgd_minibatch_size"] = original_config["sgd_minibatch_size"]
+
+    config_updates.update(updates)
+
     for policy_id in policy_ids:
         per_policy_config_updates[policy_id].update(
             {
@@ -176,7 +198,12 @@ def main(
     ray_init_kwargs: dict,
     _log,
 ):
-    ray.init(ignore_reinit_error=True, include_dashboard=False, **ray_init_kwargs)
+    ray.init(
+        ignore_reinit_error=True,
+        include_dashboard=False,
+        _temp_dir=tempfile.mkdtemp(),
+        **ray_init_kwargs,
+    )
 
     os.makedirs(out_dir, exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -240,46 +267,131 @@ def main(
                     )
 
         occupancy_measure_kl_vals = []
+        occupancy_measure_chi2_vals = []
+        occupancy_measure_sqrt_chi2_vals = []
+
         action_distribution_kl_vals = []
+        action_distribution_chi2_vals = []
+        action_distribution_sqrt_chi2_vals = []
+
         data = []
-        for file_data in batches:
-            file_data_cpu = file_data.policy_batches[policy_id].copy()
-            file_data_cuda = file_data.policy_batches[policy_id].to_device(device)
-            data.append(file_data_cuda)
-            if CURRENT_POLICY_ID in policy_id:
-                discriminator_policy_scores = model.discriminator(file_data_cuda)
-                occupancy_measure_kl = np.mean(
-                    discriminator_policy_scores[:, 0].cpu().detach().numpy()
-                )
-                occupancy_measure_kl_vals.append(occupancy_measure_kl)
-                safe_policy_action_dist_inputs = algorithm.get_safe_policy_dist_inputs(
-                    current_batch=file_data_cpu,
-                    safe_policy_model=(
-                        model.to("cpu") if ray_init_kwargs["local_mode"] else model
-                    ),
-                    safe_policy=safe_policy,
-                )
-                if safe_policy_action_dist_class is not None:
-                    safe_policy_action_dist = safe_policy_action_dist_class(
-                        torch.from_numpy(safe_policy_action_dist_inputs).cpu().detach(),
-                        None,
+        if isinstance(algorithm, ORPO):
+            for file_data in batches:
+                file_data = file_data.as_multi_agent()
+                file_data_cpu = file_data.policy_batches[policy_id].copy()
+                file_data_cuda = file_data.policy_batches[policy_id].to_device(device)
+                data.append(file_data_cuda)
+                if CURRENT_POLICY_ID in policy_id:
+                    discriminator_policy_scores = model.discriminator(file_data_cuda)
+                    # kl
+                    occupancy_measure_kl = np.mean(
+                        discriminator_policy_scores[:, 0].cpu().detach().numpy()
                     )
-                    current_action_dist = current_policy_action_dist_class(
-                        file_data_cuda[SampleBatch.ACTION_DIST_INPUTS].cpu().detach(),
-                        None,
+                    occupancy_measure_kl_vals.append(occupancy_measure_kl)
+
+                    # chi2
+                    occupancy_measure_chi2_scores = (
+                        discriminator_policy_scores[:, 0].exp().cpu().detach().numpy()
+                        - 1
                     )
-                    action_distribution_kl = current_action_dist.kl(
-                        safe_policy_action_dist
-                    ).mean()
+                    occupancy_measure_chi2 = np.mean(occupancy_measure_chi2_scores)
+                    occupancy_measure_chi2_vals.append(occupancy_measure_chi2)
+
+                    # sqrt chi2
+                    occupancy_measure_chi2_sorted = np.sort(
+                        occupancy_measure_chi2_scores
+                    )
+                    i = int(0.01 * len(occupancy_measure_chi2_sorted))
+                    occupancy_measure_chi2_trimmed = np.mean(
+                        occupancy_measure_chi2_sorted[i:-i]
+                    )
+                    if occupancy_measure_chi2_trimmed <= 0:
+                        occupancy_measure_sqrt_chi2_scores = (
+                            occupancy_measure_chi2_scores
+                        )
+                    else:
+                        occupancy_measure_sqrt_chi2_scores = (
+                            occupancy_measure_chi2_scores
+                            / np.sqrt(occupancy_measure_chi2_trimmed)
+                        )
+                    occupancy_measure_sqrt_chi2 = np.mean(
+                        occupancy_measure_sqrt_chi2_scores
+                    )
+                    occupancy_measure_sqrt_chi2_vals.append(occupancy_measure_sqrt_chi2)
+
+                    safe_policy_action_dist_inputs = (
+                        algorithm.get_safe_policy_dist_inputs(
+                            current_batch=file_data_cpu,
+                            safe_policy_model=(
+                                model.to("cpu")
+                                if ray_init_kwargs["local_mode"]
+                                else model
+                            ),
+                            safe_policy=safe_policy,
+                        )
+                    )
+                    if safe_policy_action_dist_class is not None:
+                        safe_policy_action_dist = safe_policy_action_dist_class(
+                            torch.from_numpy(safe_policy_action_dist_inputs)
+                            .cpu()
+                            .detach(),
+                            None,
+                        )
+                        current_action_dist = current_policy_action_dist_class(
+                            file_data_cuda[SampleBatch.ACTION_DIST_INPUTS]
+                            .cpu()
+                            .detach(),
+                            None,
+                        )
+
+                        # AD KL
+                        action_distribution_kl = current_action_dist.kl(
+                            safe_policy_action_dist
+                        ).mean()
+
+                        # AD chi2
+                        action_distribution_chi2_scores = chi2_divergence(
+                            current_action_dist, safe_policy_action_dist
+                        )
+                        action_distribution_chi2_scores = torch.where(
+                            torch.isfinite(action_distribution_chi2_scores),
+                            action_distribution_chi2_scores,
+                            action_distribution_kl,
+                        )
+                        action_distribution_chi2 = torch.mean(
+                            action_distribution_chi2_scores
+                        )
+
+                        # AD sqrt chi2
+                        action_distribution_sqrt_chi2_scores = torch.sqrt(
+                            action_distribution_chi2_scores.clamp(min=1e-4)
+                        )
+                        action_distribution_sqrt_chi2 = torch.mean(
+                            action_distribution_sqrt_chi2_scores
+                        )
+                    else:
+                        logger.warn(
+                            "Unable to calculate action distribution divergence without safe policy action distribution class specified!"
+                        )
+                        action_distribution_kl = torch.tensor(0)
+                        action_distribution_chi2 = torch.tensor(0)
+                        action_distribution_sqrt_chi2 = torch.tensor(0)
+                    action_distribution_kl_vals.append(action_distribution_kl.item())
+                    action_distribution_chi2_vals.append(
+                        action_distribution_chi2.item()
+                    )
+                    action_distribution_sqrt_chi2_vals.append(
+                        action_distribution_sqrt_chi2.item()
+                    )
                 else:
                     logger.warn(
-                        "Unable to calculate action distribution KL without safe policy action distribution class specified!"
+                        "OM and AD divergences can't be calculated for safe policies"
                     )
-                    action_distribution_kl = torch.tensor(0)
-                action_distribution_kl_vals.append(action_distribution_kl.item())
-            else:  # occupancy measure kL and action distribution KL can't be calculated for safe policies
-                occupancy_measure_kl_vals.append(0)
-                action_distribution_kl_vals.append(0)
+                    occupancy_measure_kl_vals.append(0)
+                    occupancy_measure_chi2_vals.append(0)
+                    action_distribution_kl_vals.append(0)
+                    action_distribution_chi2_vals.append(0)
+                    action_distribution_sqrt_chi2_vals.append(0)
 
         vals_of_interest = {
             "mean_true_reward": eval_results[policy_id]["custom_metrics"][
@@ -300,6 +412,30 @@ def main(
             "occupancy_measure_kl_vals": np.array(
                 occupancy_measure_kl_vals, dtype="float64"
             ).tolist(),
+            "average_occupancy_measure_chi2": np.mean(
+                occupancy_measure_chi2_vals, dtype="float64"
+            ),
+            "occupancy_measure_chi2_vals": np.array(
+                occupancy_measure_chi2_vals, dtype="float64"
+            ).tolist(),
+            "average_occupancy_measure_sqrt_chi2": np.mean(
+                occupancy_measure_sqrt_chi2_vals, dtype="float64"
+            ),
+            "occupancy_measure_sqrt_chi2_vals": np.array(
+                occupancy_measure_sqrt_chi2_vals, dtype="float64"
+            ).tolist(),
+            "average_action_distribution_chi2": np.mean(
+                action_distribution_chi2_vals, dtype="float64"
+            ),
+            "action_distribution_chi2_vals": np.array(
+                action_distribution_chi2_vals, dtype="float64"
+            ).tolist(),
+            "average_action_distribution_sqrt_chi2": np.mean(
+                action_distribution_sqrt_chi2_vals, dtype="float64"
+            ),
+            "action_distribution_sqrt_chi2_vals": np.array(
+                action_distribution_sqrt_chi2_vals, dtype="float64"
+            ).tolist(),
         }
         with open(
             out_dir + "/output_metrics_" + policy_id + ".json", "w"
@@ -307,7 +443,7 @@ def main(
             json.dump(vals_of_interest, vals_of_interest_file)
             vals_of_interest_file.close()
         with open(out_dir + "/eval_result_" + policy_id + ".json", "w") as out_file:
-            json.dump(eval_results[policy_id], out_file)
+            json.dump(eval_results[policy_id], out_file, cls=NpEncoder)
             out_file.close()
         episode_lengths = np.sum(
             eval_results[policy_id]["hist_stats"]["episode_lengths"]
@@ -319,7 +455,7 @@ def main(
         logger.info("Saved stats for the policy with ID " + policy_id)
         logger.info("Average Reward per timestep: " + str(average_reward))
 
-        if generate_histogram:
+        if generate_histogram and isinstance(algorithm, ORPO):
             assert isinstance(model, ModelWithDiscriminator)
             observations: Any = []
             disc_outputs: Any = []

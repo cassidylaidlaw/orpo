@@ -1,4 +1,5 @@
 import logging
+from ast import Str
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple, Type, Union, cast
 
@@ -15,6 +16,11 @@ from ray.rllib.execution.rollout_ops import (
 )
 from ray.rllib.execution.train_ops import multi_gpu_train_one_step, train_one_step
 from ray.rllib.models import ActionDistribution, ModelV2
+from ray.rllib.models.torch.torch_action_dist import (
+    TorchBeta,
+    TorchCategorical,
+    TorchDiagGaussian,
+)
 from ray.rllib.policy.policy import Policy
 from ray.rllib.policy.sample_batch import MultiAgentBatch, SampleBatch, concat_samples
 from ray.rllib.policy.torch_mixins import (
@@ -46,6 +52,7 @@ logger = logging.getLogger(__name__)
 
 
 DISCRIMINATOR_REWARDS = "discriminator_rewards"
+UNCLIPPED_DISCRIMINATOR_REWARDS = "unclipped_discriminator_rewards"
 IS_SAFE_POLICY = "is_safe_policy"
 SAFE_POLICY_ACTION_DIST_INPUTS = "safe_policy_action_dist_inputs"
 
@@ -54,14 +61,17 @@ class ORPOConfig(PPOConfig):
     def __init__(self, algo_class=None):
         super().__init__(algo_class=algo_class or ORPO)
         self.om_divergence_coeffs: Dict[PolicyID, float] = {}
-        self.om_divergence_type: Dict[PolicyID, float] = {}
-        self.action_dist_kl_coeff: Optional[float] = None
+        self.om_divergence_type: Dict[PolicyID, Str] = {}
+        self.action_dist_divergence_coeff: Optional[float] = None
+        self.action_dist_divergence_type: str = "kl"
         self.update_safe_policy_freq: Optional[int] = None
         self.safe_policy_ids: List[PolicyID] = []
         self.current_policy_id: PolicyID = "current"
+        self.train_discriminator_first = True
         self.discriminator_reward_clip = np.inf
         self.num_extra_repeated_safe_policy_batches = 1
         self.discriminator_state_info_key: Optional[str] = None
+        self.discriminator_num_sgd_iter: Optional[int] = None
 
         # parameters to use when using wasserstein distance
         self.wgan_grad_clip = 0.01
@@ -77,10 +87,10 @@ class ORPOConfig(PPOConfig):
     def validate(self) -> None:
         super().validate()
 
-        if self.action_dist_kl_coeff is not None:
+        if self.action_dist_divergence_coeff is not None:
             if len(self.safe_policy_ids) != 1:
                 raise ValueError(
-                    "Must specify exactly one safe policy when using action_dist_kl_coeff"
+                    "Must specify exactly one safe policy when using action_dist_divergence_coeff"
                 )
 
     @override(AlgorithmConfig)
@@ -89,13 +99,16 @@ class ORPOConfig(PPOConfig):
         *,
         om_divergence_coeffs: Dict = NotProvided,  # type: ignore[assignment]
         om_divergence_type: Dict = NotProvided,  # type: ignore[assignment]
-        action_dist_kl_coeff: Optional[float] = NotProvided,  # type: ignore[assignment]
+        action_dist_divergence_coeff: Optional[float] = NotProvided,  # type: ignore[assignment]
+        action_dist_divergence_type: str = NotProvided,  # type: ignore[assignment]
         update_safe_policy_freq: Optional[int] = NotProvided,  # type: ignore[assignment]
         safe_policy_ids: List[str] = NotProvided,  # type: ignore[assignment]
         current_policy_id: str = NotProvided,  # type: ignore[assignment]
+        train_discriminator_first: bool = NotProvided,  # type: ignore[assignment]
         discriminator_reward_clip: float = NotProvided,  # type: ignore[assignment]
         num_extra_repeated_safe_policy_batches: int = NotProvided,  # type: ignore[assignment]
         discriminator_state_info_key: Optional[str] = NotProvided,  # type: ignore[assignment]
+        discriminator_num_sgd_iter: Optional[int] = NotProvided,  # type: ignore[assignment]
         wgan_grad_clip: Union[int, float] = NotProvided,  # type: ignore[assignment]
         wgan_grad_penalty_weight: Optional[Union[int, float]] = NotProvided,  # type: ignore[assignment]
         wasserstein_distance_subtract_mean_safe_policy_score: Optional[
@@ -108,11 +121,14 @@ class ORPOConfig(PPOConfig):
     ) -> "ORPOConfig":
         """Sets the training related configuration.
         Args:
-            om_divergence_coeffs: weight for the KL divergence allowed
+            om_divergence_coeffs: weight for the OM divergence allowed
                 from the safe policy
             om_divergence_type: what type of distance measure to use
-                (kl, tv, wasserstein)
-            action_dist_kl_coeff: for action distribution kl, set this coefficient
+                (kl, tv, wasserstein, chi2, sqrt_chi2)
+            action_dist_divergence_coeff: for action distribution regularization,
+                set this coefficient
+            action_dist_divergence_type: the type of action distribution
+                regularization to use (kl, chi2, sqrt_chi2)
             update_safe_policy_freq: when using multiple safe policies,
                 set this option to specify with what frequency the safe policy
                 should be updated this could be used for detection of reward
@@ -120,6 +136,8 @@ class ORPOConfig(PPOConfig):
                 during training
             safe_policy_ids: the policy ids for the safe policies
             current_policy_id: the policy id of the policy to train
+            train_discriminator_first: whether or not to train the discriminator
+                before using it to calculate rewards for the policy
             discriminator_reward_clip: clipping for discriminator rewards to
                 help with instability
             num_extra_repeated_safe_policy_batches: train the discriminator
@@ -127,6 +145,9 @@ class ORPOConfig(PPOConfig):
             discriminator_state_info_key: when using a different state to
                 train the discriminator (i.e., the true state), specify which
                 key to look for in info dict
+            discriminator_num_sgd_iter: number of epochs to train the
+                discriminator; if None, will use the same number of epochs
+                as the policy.
             wgan_grad_clip: gradient clipping for the lipschitz condition
             wgan_grad_penalty_weight: specify weight for gradient penalty
             wasserstein_distance_subtract_mean_safe_policy_score: whether or not
@@ -145,8 +166,10 @@ class ORPOConfig(PPOConfig):
             self.om_divergence_coeffs = om_divergence_coeffs
         if om_divergence_type is not NotProvided:
             self.om_divergence_type = om_divergence_type
-        if action_dist_kl_coeff is not NotProvided:
-            self.action_dist_kl_coeff = action_dist_kl_coeff
+        if action_dist_divergence_coeff is not NotProvided:
+            self.action_dist_divergence_coeff = action_dist_divergence_coeff
+        if action_dist_divergence_type is not NotProvided:
+            self.action_dist_divergence_type = action_dist_divergence_type
         if update_safe_policy_freq is not NotProvided:
             self.update_safe_policy_freq = update_safe_policy_freq
         if safe_policy_ids is not NotProvided:
@@ -155,9 +178,11 @@ class ORPOConfig(PPOConfig):
             self.current_policy_id = current_policy_id
 
         self._set_discriminator_params(
+            train_discriminator_first,
             discriminator_reward_clip,
             num_extra_repeated_safe_policy_batches,
             discriminator_state_info_key,
+            discriminator_num_sgd_iter,
         )
         self._set_wasserstein_params(
             wgan_grad_clip,
@@ -174,10 +199,14 @@ class ORPOConfig(PPOConfig):
 
     def _set_discriminator_params(
         self,
+        train_discriminator_first,
         discriminator_reward_clip,
         num_extra_repeated_safe_policy_batches,
         discriminator_state_info_key,
+        discriminator_num_sgd_iter,
     ):
+        if train_discriminator_first is not NotProvided:
+            self.train_discriminator_first = train_discriminator_first
         if discriminator_reward_clip is not NotProvided:
             self.discriminator_reward_clip = discriminator_reward_clip
         if num_extra_repeated_safe_policy_batches is not NotProvided:
@@ -186,6 +215,8 @@ class ORPOConfig(PPOConfig):
             )
         if discriminator_state_info_key is not NotProvided:
             self.discriminator_state_info_key = discriminator_state_info_key
+        if discriminator_num_sgd_iter is not NotProvided:
+            self.discriminator_num_sgd_iter = discriminator_num_sgd_iter
 
     def _set_wasserstein_params(
         self,
@@ -218,9 +249,80 @@ class ORPOConfig(PPOConfig):
             )
 
 
+def _beta_chi2(
+    alpha_1: torch.Tensor,
+    beta_1: torch.Tensor,
+    alpha_2: torch.Tensor,
+    beta_2: torch.Tensor,
+) -> torch.Tensor:
+    log_x = torch.where(
+        (2 * alpha_1 - alpha_2 > 0) & (2 * beta_1 - beta_2 > 0),
+        2 * torch.lgamma(alpha_1 + beta_1)
+        + torch.lgamma(alpha_2)
+        + torch.lgamma(beta_2)
+        - torch.lgamma(alpha_2 + beta_2)
+        - 2 * torch.lgamma(alpha_1)
+        - 2 * torch.lgamma(beta_1)
+        + torch.lgamma(2 * alpha_1 - alpha_2)
+        + torch.lgamma(2 * beta_1 - beta_2)
+        - torch.lgamma(2 * alpha_1 - alpha_2 + 2 * beta_1 - beta_2),
+        torch.nan,
+    )
+    return cast(torch.Tensor, torch.special.expm1(log_x.sum(dim=-1)))
+
+
+def chi2_divergence(
+    p: ActionDistribution,
+    q: ActionDistribution,
+) -> torch.Tensor:
+    if isinstance(p, TorchCategorical):
+        assert isinstance(q, TorchCategorical)
+        x: torch.Tensor = (p.dist.probs - q.dist.probs) ** 2 / q.dist.probs
+        x[(q.dist.probs == 0) & (p.dist.probs == 0)] = 0
+        return x.sum(-1)
+    elif isinstance(p, TorchDiagGaussian):
+        assert isinstance(q, TorchDiagGaussian)
+
+        mean_1 = p.dist.loc
+        mean_2 = q.dist.loc
+        std_1 = p.dist.scale
+        std_2 = q.dist.scale
+
+        d = 2 * std_2**2 - std_1**2
+
+        x = std_2**2 / (std_1 * torch.sqrt(d)) * torch.exp((mean_1 - mean_2) ** 2 / d)
+        return torch.prod(x, dim=-1) - 1
+    elif isinstance(p, TorchBeta):
+        assert isinstance(q, TorchBeta)
+
+        alpha_1 = p.dist.concentration1
+        beta_1 = p.dist.concentration0
+        alpha_2 = q.dist.concentration1
+        beta_2 = q.dist.concentration0
+
+        # We calculate the chi-squared divergence twice, but the second time only on
+        # the values that came out finite. This ensures that backprop doesn't create
+        # nan gradients.
+        with torch.no_grad():
+            first_chi2 = _beta_chi2(alpha_1, beta_1, alpha_2, beta_2)
+            mask = torch.isfinite(first_chi2)
+            second_chi2 = torch.zeros(len(first_chi2), device=first_chi2.device)
+        second_chi2[mask] = _beta_chi2(
+            alpha_1[mask], beta_1[mask], alpha_2[mask], beta_2[mask]
+        )
+
+        return torch.where(
+            mask,
+            second_chi2.clip(min=0),
+            torch.inf,
+        )
+    else:
+        raise NotImplementedError(f"Unsupported distribution: {type(p)}")
+
+
 class ORPOPolicy(PPOTorchPolicy):
     is_safe_policy: bool
-    action_dist_kl_coeff: float
+    action_dist_divergence_coeff: float
 
     def __init__(self, observation_space, action_space, config):
         config = ORPO.merge_algorithm_configs(
@@ -255,8 +357,8 @@ class ORPOPolicy(PPOTorchPolicy):
 
         self.is_safe_policy = False
 
-        self.action_dist_kl_coeff = 0
-        self.occupancy_measure_kl_coeff = 0
+        self.action_dist_divergence_coeff = 0
+        self.occupancy_measure_divergence_coeff = 0
         self.gamma_scaling = 1 / (1 - self.config["gamma"])
 
         self._initialize_loss_from_dummy_batch()
@@ -437,7 +539,8 @@ class ORPOPolicy(PPOTorchPolicy):
                     model,
                 )
             elif (
-                self.config["om_divergence_type"][self.policy_id] == "kl"
+                self.config["om_divergence_type"][self.policy_id]
+                in ["kl", "chi2", "sqrt_chi2"]
                 or self.config["om_divergence_type"][self.policy_id]
                 == "safe_policy_confidence"
             ):
@@ -450,8 +553,10 @@ class ORPOPolicy(PPOTorchPolicy):
                 om_divergence_type = self.config["om_divergence_type"][self.policy_id]
                 logger.error(f"Unsupported OM divergence: '{om_divergence_type}")
             model.tower_stats["discriminator_loss"] = discriminator_loss
-            model.tower_stats["occupancy_measure_kl_coeff"] = torch.tensor(
-                self.occupancy_measure_kl_coeff, device=self.device, dtype=torch.float32
+            model.tower_stats["occupancy_measure_divergence_coeff"] = torch.tensor(
+                self.occupancy_measure_divergence_coeff,
+                device=self.device,
+                dtype=torch.float32,
             )
 
         if DISCRIMINATOR_REWARDS in train_batch:
@@ -475,15 +580,47 @@ class ORPOPolicy(PPOTorchPolicy):
                     None,
                 )
 
-                action_dist_kl = current_action_dist.kl(safe_policy_action_dist).mean()
-                model.tower_stats["curr_base_action_distribution_kl"] = action_dist_kl
+                action_dist_kl = current_action_dist.kl(safe_policy_action_dist)
+                model.tower_stats["curr_base_action_distribution_kl"] = torch.mean(
+                    action_dist_kl
+                ).detach()
 
-                ppo_loss = ppo_loss + (
-                    self.gamma_scaling * self.action_dist_kl_coeff * action_dist_kl
+                action_dist_chi2 = chi2_divergence(
+                    current_action_dist, safe_policy_action_dist
                 )
+                model.tower_stats["curr_base_action_distribution_chi2_finite_prop"] = (
+                    torch.isfinite(action_dist_chi2).float().mean().detach()
+                )
+                # Not sure of the best way to handle this, but we don't want to ignore
+                # states where the chi-squared divergence is infinite, so maybe fine
+                # to instead optimize the KL divergence in that case.
+                action_dist_chi2 = torch.where(
+                    torch.isfinite(action_dist_chi2),
+                    action_dist_chi2,
+                    action_dist_kl,
+                )
+                model.tower_stats["curr_base_action_distribution_chi2"] = torch.mean(
+                    action_dist_chi2
+                ).detach()
 
-                model.tower_stats["action_dist_kl_coeff"] = torch.tensor(
-                    self.action_dist_kl_coeff,
+                if self.config["action_dist_divergence_type"] == "kl":
+                    action_dist_divergence = action_dist_kl
+                elif self.config["action_dist_divergence_type"] == "chi2":
+                    action_dist_divergence = action_dist_chi2
+                elif self.config["action_dist_divergence_type"] == "sqrt_chi2":
+                    action_dist_divergence = torch.sqrt(
+                        action_dist_chi2.clamp(min=1e-4)
+                    )
+
+                if self.action_dist_divergence_coeff != 0:
+                    ppo_loss = ppo_loss + (
+                        self.gamma_scaling
+                        * self.action_dist_divergence_coeff
+                        * torch.mean(action_dist_divergence)
+                    )
+
+                model.tower_stats["action_dist_divergence_coeff"] = torch.tensor(
+                    self.action_dist_divergence_coeff,
                     device=self.device,
                     dtype=torch.float32,
                 )
@@ -501,8 +638,19 @@ class ORPOPolicy(PPOTorchPolicy):
             ("discriminator/safe_policy_score", "discriminator_safe_policy_score"),
             ("discriminator/reward", "discriminator_reward"),
             ("curr_base_action_distribution_kl", "curr_base_action_distribution_kl"),
-            ("action_dist_kl_coeff", "action_dist_kl_coeff"),
-            ("occupancy_measure_kl_coeff", "occupancy_measure_kl_coeff"),
+            (
+                "curr_base_action_distribution_chi2",
+                "curr_base_action_distribution_chi2",
+            ),
+            (
+                "curr_base_action_distribution_chi2_finite_prop",
+                "curr_base_action_distribution_chi2_finite_prop",
+            ),
+            ("action_dist_divergence_coeff", "action_dist_divergence_coeff"),
+            (
+                "occupancy_measure_divergence_coeff",
+                "occupancy_measure_divergence_coeff",
+            ),
         ]:
             try:
                 stats[stats_key] = torch.mean(
@@ -541,18 +689,18 @@ class ORPO(PPO):
 
     def setup(self, config):
         super().setup(config)
-        if self.config.action_dist_kl_coeff is not None:
+        if self.config.action_dist_divergence_coeff is not None:
             assert len(self.config.safe_policy_ids) == 1
-            self.get_policy(self.config.current_policy_id).action_dist_kl_coeff = (
-                self.config.action_dist_kl_coeff
-            )
+            self.get_policy(
+                self.config.current_policy_id
+            ).action_dist_divergence_coeff = self.config.action_dist_divergence_coeff
 
         for policy_id in self.config.safe_policy_ids:
             policy = self.get_policy(policy_id)
             policy.is_safe_policy = True
-            policy.occupancy_measure_kl_coeff = self.config.om_divergence_coeffs[
-                policy_id
-            ]
+            policy.occupancy_measure_divergence_coeff = (
+                self.config.om_divergence_coeffs[policy_id]
+            )
 
             def set_safe_policy(worker: RolloutWorker, policy_id=policy_id):
                 policy = worker.get_policy(policy_id)
@@ -663,6 +811,31 @@ class ORPO(PPO):
         info[safe_policy_id]["occupancy_measure_kl"] = np.mean(rewards)
         return rewards
 
+    def _chi2_discriminator_rewards(
+        self, info, safe_policy_id, discriminator_policy_scores
+    ):
+        rewards = (discriminator_policy_scores[:, 0].detach().exp() - 1).cpu().numpy()
+        info[safe_policy_id]["occupancy_measure_chi2"] = np.mean(rewards)
+        return rewards
+
+    def _sqrt_chi2_discriminator_rewards(
+        self, info, safe_policy_id, discriminator_policy_scores
+    ):
+        chi2_rewards = self._chi2_discriminator_rewards(
+            info, safe_policy_id, discriminator_policy_scores
+        )
+        chi2_rewards_sorted = np.sort(chi2_rewards)
+        i = int(0.01 * len(chi2_rewards_sorted))
+        occupancy_measure_chi2_trimmed = np.mean(chi2_rewards_sorted[i:-i])
+        info[safe_policy_id][
+            "occupancy_measure_chi2_trimmed"
+        ] = occupancy_measure_chi2_trimmed
+        if occupancy_measure_chi2_trimmed <= 0:
+            rewards = chi2_rewards
+        else:
+            rewards = chi2_rewards / np.sqrt(occupancy_measure_chi2_trimmed)
+        return rewards
+
     def augment_reward_with_discriminator_and_transfer_action_dist_inputs(
         self, train_batch: MultiAgentBatch
     ) -> Tuple[MultiAgentBatch, Dict[str, Dict[str, float]]]:
@@ -694,7 +867,9 @@ class ORPO(PPO):
         for policy_id in self.config.safe_policy_ids:
             if policy_id in train_batch.policy_batches:
                 policy = self.get_policy(policy_id)
-                occupancy_measure_kl_coeff = policy.occupancy_measure_kl_coeff
+                occupancy_measure_divergence_coeff = (
+                    policy.occupancy_measure_divergence_coeff
+                )
                 if not isinstance(policy, ORPOPolicy):
                     logger.warn("A non-ORPO policy is being used for regularization!")
                     continue
@@ -765,13 +940,26 @@ class ORPO(PPO):
                     distance = self._kl_discriminator_rewards(
                         info, policy_id, discriminator_policy_scores
                     )
+                elif self.config.om_divergence_type[policy_id] == "chi2":
+                    distance = self._chi2_discriminator_rewards(
+                        info, policy_id, discriminator_policy_scores
+                    )
+                elif self.config.om_divergence_type[policy_id] == "sqrt_chi2":
+                    distance = self._sqrt_chi2_discriminator_rewards(
+                        info, policy_id, discriminator_policy_scores
+                    )
                 else:
                     logger.error(
                         "No other OM-based divergences are currently supported."
                     )
-                per_policy_discriminator_reward += (
-                    -occupancy_measure_kl_coeff * distance
-                )
+                if occupancy_measure_divergence_coeff != 0:
+                    distance[~np.isfinite(distance)] = 0
+                    per_policy_discriminator_reward += (
+                        -occupancy_measure_divergence_coeff * distance
+                    )
+
+        assert np.all(np.isfinite(per_policy_discriminator_reward))
+        current_batch[UNCLIPPED_DISCRIMINATOR_REWARDS] = per_policy_discriminator_reward
         per_policy_discriminator_reward = np.clip(
             per_policy_discriminator_reward,
             -self.config.discriminator_reward_clip,
@@ -781,16 +969,28 @@ class ORPO(PPO):
         current_batch[SampleBatch.REWARDS] = (
             current_batch[SampleBatch.REWARDS] + current_batch[DISCRIMINATOR_REWARDS]
         )
+        assert np.all(np.isfinite(current_batch[SampleBatch.REWARDS]))
         episode_batches = current_batch.split_by_episode()
         episode_rewards_with_discriminator = []
+        unclipped_episode_rewards_with_discriminator = []
         for i in range(len(episode_batches)):
             episode_rewards_with_discriminator.append(
                 np.sum(episode_batches[i][SampleBatch.REWARDS])
+            )
+            unclipped_episode_rewards_with_discriminator.append(
+                np.sum(
+                    episode_batches[i][UNCLIPPED_DISCRIMINATOR_REWARDS]
+                    - episode_batches[i][DISCRIMINATOR_REWARDS]
+                    + episode_batches[i][SampleBatch.REWARDS]
+                )
             )
 
         info[self.config.current_policy_id][
             "episode_reward_with_discriminator_mean"
         ] = np.mean(episode_rewards_with_discriminator)
+        info[self.config.current_policy_id][
+            "episode_reward_with_unclipped_discriminator_mean"
+        ] = np.mean(unclipped_episode_rewards_with_discriminator)
 
         # Need to split into episodes since postprocess_trajectory expects
         # single-episode batches.
@@ -877,29 +1077,31 @@ class ORPO(PPO):
                                 self.config.wgan_grad_clip,
                             )
 
-    def update_occupancy_measure_kl_coeffs(self, total_kl, policy_id):
+    def update_occupancy_measure_divergence_coeffs(self, total_kl, policy_id):
         # This function implements the adaptive KL setup (probably going to be removed)
         policy = self.get_policy(policy_id)
-        kl_coeff = policy.occupancy_measure_kl_coeff
+        divergence_coeff = policy.occupancy_measure_divergence_coeff
         if self.config.use_squared_kl_adaptive_coefficient:
-            kl_coeff = self.config.om_divergence_coeffs[policy_id] * total_kl
+            divergence_coeff = self.config.om_divergence_coeffs[policy_id] * total_kl
         elif total_kl > 2.0 * self.config.occupancy_measure_kl_target[policy_id]:
-            kl_coeff *= 1.5
+            divergence_coeff *= 1.5
         elif total_kl < 0.5 * self.config.occupancy_measure_kl_target[policy_id]:
-            kl_coeff *= 0.5
-        policy.occupancy_measure_kl_coeff = kl_coeff
+            divergence_coeff *= 0.5
+        policy.occupancy_measure_divergence_coeff = divergence_coeff
 
         if (
-            self.config.action_dist_kl_coeff
+            self.config.action_dist_divergence_coeff
             and self.config.use_squared_kl_adaptive_coefficient
         ):
-            self.get_policy(self.config.current_policy_id).action_dist_kl_coeff = (
-                self.config.action_dist_kl_coeff * total_kl
+            self.get_policy(
+                self.config.current_policy_id
+            ).action_dist_divergence_coeff = (
+                self.config.action_dist_divergence_coeff * total_kl
             )
         elif self.config.split_om_kl:
-            self.get_policy(self.config.current_policy_id).action_dist_kl_coeff = (
-                kl_coeff
-            )
+            self.get_policy(
+                self.config.current_policy_id
+            ).action_dist_divergence_coeff = divergence_coeff
 
     def training_step(self) -> ResultDict:
         assert self.workers is not None
@@ -927,6 +1129,14 @@ class ORPO(PPO):
                     ]
                 )
 
+        if not self.config.train_discriminator_first:
+            (
+                train_batch,
+                occupancy_measure_info,
+            ) = self.augment_reward_with_discriminator_and_transfer_action_dist_inputs(
+                train_batch
+            )
+
         # only train the discriminator using data from the current and safe
         # policies after batch transfer
         train_results_safe_policy: ResultDict
@@ -937,19 +1147,28 @@ class ORPO(PPO):
         safe_policy_train_batch = MultiAgentBatch(
             policy_batches=safe_policy_batches, env_steps=train_batch.env_steps()
         )
+        num_sgd_iter = self.config.num_sgd_iter
+        if self.config.discriminator_num_sgd_iter is not None:
+            self.config._is_frozen = False
+            self.config.num_sgd_iter = self.config.discriminator_num_sgd_iter
+            self.config._is_frozen = True
         if self.config.simple_optimizer:
             train_results_safe_policy = train_one_step(self, safe_policy_train_batch)
         else:
             train_results_safe_policy = multi_gpu_train_one_step(
                 self, safe_policy_train_batch
             )
+        self.config._is_frozen = False
+        self.config.num_sgd_iter = num_sgd_iter
+        self.config._is_frozen = True
 
-        (
-            train_batch,
-            occupancy_measure_info,
-        ) = self.augment_reward_with_discriminator_and_transfer_action_dist_inputs(
-            train_batch
-        )
+        if self.config.train_discriminator_first:
+            (
+                train_batch,
+                occupancy_measure_info,
+            ) = self.augment_reward_with_discriminator_and_transfer_action_dist_inputs(
+                train_batch
+            )
 
         # Standardize advantages
         train_batch = standardize_fields(train_batch, ["advantages"])
@@ -1021,7 +1240,7 @@ class ORPO(PPO):
                 or self.config.use_squared_kl_adaptive_coefficient
             ) and policy_id in self.config.safe_policy_ids:
                 total_kl = policy_occupancy_measure_info.get("occupancy_measure_kl", 0)
-                if self.config.split_om_kl or self.config.action_dist_kl_coeff:
+                if self.config.split_om_kl or self.config.action_dist_divergence_coeff:
                     action_distribution_kl = policy_occupancy_measure_info.get(
                         "action_distribution_kl", 0
                     )
@@ -1030,7 +1249,7 @@ class ORPO(PPO):
                         "total_om_action_distribution_kl"
                     ] = total_kl
                 total_kl = np.clip(total_kl, 0, None)
-                self.update_occupancy_measure_kl_coeffs(total_kl, policy_id)
+                self.update_occupancy_measure_divergence_coeffs(total_kl, policy_id)
 
         return train_results
 
