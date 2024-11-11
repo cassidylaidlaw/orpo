@@ -22,7 +22,7 @@ python -m occupancy_measures.experiments.orpo_experiments with env_to_run=$ENV r
 ```
 python -m occupancy_measures.experiments.orpo_experiments with env_to_run=$ENV reward_fun=proxy exp_algo=ORPO 'om_divergence_coeffs=['$COEFF']' use_action_for_disc 'checkpoint_to_load_policies=["'$BC_CHECKPOINT'"]' checkpoint_to_load_current_policy=$BC_CHECKPOINT seed=$SEED experiment_tag=state 'om_divergence_type=["'$TYPE'"]'
 ```
-- action distribution regularization:
+- action distribution regularization (Note that we set the ```om_divergence_type``` variable to log the OM divergence for these runs):
 ```
 python -m occupancy_measures.experiments.orpo_experiments with env_to_run=$ENV reward_fun=proxy exp_algo=ORPO action_dist_kl_coeff=$COEFF seed=$SEED 'checkpoint_to_load_policies=["'$BC_CHECKPOINT'"]' checkpoint_to_load_current_policy=$BC_CHECKPOINT experiment_tag=AD 'om_divergence_type=["'$TYPE'"]'
 ```
