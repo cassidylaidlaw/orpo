@@ -12,7 +12,7 @@ All Python code is under the `occupancy_measures` package. Run
 to install dependencies.
 
 ## Training the ORPO policies
-Checkpoints for the behavioral cloning (BC) trained base policies are stored within the `data/safe_policy_checkpoints` directory. For now, these checkpoints were generated in Python 3.9, but in the future, we will provide checkpoints that work with all python versions. You can use these checkpoints to train your own ORPO policies using the following commands: 
+Checkpoints for the behavioral cloning (BC) trained base policies are stored within the `data/base_policy_checkpoints` directory. For now, these checkpoints were generated in Python 3.9, but in the future, we will provide checkpoints that work with all python versions. You can use these checkpoints to train your own ORPO policies using the following commands: 
 
 - state-action occupancy measure regularization:
 ```
