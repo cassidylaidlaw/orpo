@@ -1,11 +1,5 @@
 from distutils.core import setup
 
-with open("requirements.txt") as f:
-    requirements = []
-    for line in f:
-        if not line.startswith(("-e", "-r", "git+", "http://", "https://")):
-            requirements.append(line.strip())
-
 setup(
     name="orpo",
     packages=[
@@ -31,7 +25,12 @@ setup(
         "AI safety",
         "reward misspecification",
     ],
-    install_requires=requirements,
+    install_requires=[
+        "torch>=1.13",
+        "numpy>=1.22",
+        "sacred>=0.8",
+        "ray[rllib]==2.7.1",
+    ],
     classifiers=[
         "Development Status :: 3 - Alpha",
         "Intended Audience :: Science/Research",

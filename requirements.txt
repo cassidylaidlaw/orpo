@@ -7,7 +7,7 @@ sacred>=0.8
 scipy>=1.9
 torch>=1.13
 tqdm>=4.63
-numpy>=1.22
+numpy>=1.22,<2
 typing-extensions>=4.4
 lxml>=4.9
 pandemic-simulator @ git+https://github.com/shivamsinghal001/pandemic.git
