@@ -1,6 +1,9 @@
 # Correlated Proxies: A New Definition and Improved Mitigation for Reward Hacking
 
-This repository contains code for the paper "[Correlated Proxies: A New Definition and Improved Mitigation for Reward Hacking](https://arxiv.org/abs/2403.03185)". The code for running ORPO on the four non-RLHF environments is in this repository, while the code for RLHF experiments is at https://github.com/cassidylaidlaw/llm_optimization.
+This repository contains code for the paper "[Correlated Proxies: A New Definition and Improved Mitigation for Reward Hacking](https://arxiv.org/abs/2403.03185)". 
+
+ORPO is currently supported for RLHF and four non-RLHF environments. The code for non-RLHF experiments is in this repository, while the RLHF experiment code is at https://github.com/cassidylaidlaw/llm_optimization.
+
 
 All Python code is under the `occupancy_measures` package. Run
 
@@ -11,17 +14,17 @@ to install dependencies.
 ## Training the ORPO policies
 Checkpoints for the behavioral cloning (BC) trained safe policies are stored within the `data/safe_policy_checkpoints` directory. For now, these checkpoints were generated in Python 3.9, but in the future, we will provide checkpoints that work with all python versions. You can use these checkpoints to train your own ORPO policies using the following commands: 
 
-- state-action OM KL:
+- state-action occupancy measure regularization:
 ```
-python -m occupancy_measures.experiments.orpo_experiments with env_to_run=$ENV reward_fun=proxy exp_algo=ORPO 'om_divergence_coeffs=['$COEFF']' 'checkpoint_to_load_policies=["'$BC_CHECKPOINT'"]' checkpoint_to_load_current_policy=$BC_CHECKPOINT seed=$SEED experiment_tag=state-action
+python -m occupancy_measures.experiments.orpo_experiments with env_to_run=$ENV reward_fun=proxy exp_algo=ORPO 'om_divergence_coeffs=['$COEFF']' 'checkpoint_to_load_policies=["'$BC_CHECKPOINT'"]' checkpoint_to_load_current_policy=$BC_CHECKPOINT seed=$SEED experiment_tag=state-action 'om_divergence_type=["'$TYPE'"]'
 ```
-- state OM KL:
+- state occupancy measure regularization:
 ```
-python -m occupancy_measures.experiments.orpo_experiments with env_to_run=$ENV reward_fun=proxy exp_algo=ORPO 'om_divergence_coeffs=['$COEFF']' use_action_for_disc 'checkpoint_to_load_policies=["'$BC_CHECKPOINT'"]' checkpoint_to_load_current_policy=$BC_CHECKPOINT seed=$SEED experiment_tag=state
+python -m occupancy_measures.experiments.orpo_experiments with env_to_run=$ENV reward_fun=proxy exp_algo=ORPO 'om_divergence_coeffs=['$COEFF']' use_action_for_disc 'checkpoint_to_load_policies=["'$BC_CHECKPOINT'"]' checkpoint_to_load_current_policy=$BC_CHECKPOINT seed=$SEED experiment_tag=state 'om_divergence_type=["'$TYPE'"]'
 ```
-- action distribution KL:
+- action distribution regularization:
 ```
-python -m occupancy_measures.experiments.orpo_experiments with env_to_run=$ENV reward_fun=proxy exp_algo=ORPO action_dist_kl_coeff=$COEFF seed=$SEED 'checkpoint_to_load_policies=["'$BC_CHECKPOINT'"]' checkpoint_to_load_current_policy=$BC_CHECKPOINT experiment_tag=AD
+python -m occupancy_measures.experiments.orpo_experiments with env_to_run=$ENV reward_fun=proxy exp_algo=ORPO action_dist_kl_coeff=$COEFF seed=$SEED 'checkpoint_to_load_policies=["'$BC_CHECKPOINT'"]' checkpoint_to_load_current_policy=$BC_CHECKPOINT experiment_tag=AD 'om_divergence_type=["'$TYPE'"]'
 ```
 - true reward:
 ```
@@ -29,12 +32,25 @@ python -m occupancy_measures.experiments.orpo_experiments with env_to_run=$ENV r
 ```
 
 You can set ```ENV``` to any of the following options:
-- tomato level=4 (defined within ```occupancy_measures/envs/tomato_environment.py```
-- pandemic ([repo](https://github.com/shivamsinghal001/pandemic))
 - traffic ([repo](https://github.com/shivamsinghal001/flow_reward_misspecification))
+- pandemic ([repo](https://github.com/shivamsinghal001/pandemic))
 - glucose ([repo](https://github.com/shivamsinghal001/glucose))
+- tomato level=4 (defined within ```occupancy_measures/envs/tomato_environment.py```
 
-We ran experiments with the following range of scale-independent coefficients for each regularization technique: 0.0, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0. These must be multiplied by the per-timestep rewards in each environment:
+You can set ```TYPE``` to any of the following divergences:
+- $\sqrt{\chi^2}$ divergence: "sqrt_chi2"
+- $\chi^2$ divergence: "chi2"
+- Kullback-Leibler divergence: "kl"
+- Total variation: "tv"
+- Wasserstein: "wasserstein"
+
+For our experiments using $\sqrt{\chi^2}$ divergence, we ran experiments with the following range of scale-independent coefficients for each regularization technique: 1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01. These must be multiplied by the per-timestep proxy rewards under the safe policy for each environment:
+- traffic: 2e-4
+- pandemic: 0.08
+- glucose: 0.05
+- tomato: 0.05
+
+For our experiments using KL divergence, we ran experiments with the following range of scale-independent coefficients for each regularization technique: 0.0, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0. These must be multiplied by the per-timestep rewards in each environment:
 - traffic: 0.0005
 - pandemic: 0.06
 - glucose: 0.03
